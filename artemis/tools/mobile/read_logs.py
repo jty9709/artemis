@@ -42,7 +42,8 @@ class ReadLogsArgs(BaseModel):
     since_time: str | None = Field(
         default=None,
         description=(
-            "Target timestamp in 'MM-DD HH:MM:SS.ms' format OR relative seconds"
+            "Target timestamp 'MM-DD HH:MM:SS[.ms]', clock 'HH:MM:SS[.ms]' on the"
+            " date nearest session start, OR relative seconds"
             " (e.g., '15.5') to read logs since. If provided, we will try to"
             " fetch logs starting from this time."
         ),
@@ -50,7 +51,8 @@ class ReadLogsArgs(BaseModel):
     until_time: str | None = Field(
         default=None,
         description=(
-            "Target timestamp in 'MM-DD HH:MM:SS.ms' format OR relative seconds"
+            "Target timestamp 'MM-DD HH:MM:SS[.ms]', clock 'HH:MM:SS[.ms]' on the"
+            " date nearest session start, OR relative seconds"
             " (e.g., '20.0') to read logs until. If provided, we will filter"
             " logs up to this time."
         ),

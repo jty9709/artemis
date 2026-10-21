@@ -59,12 +59,6 @@ DIAGNOSIS_TIMEOUT_SECONDS = 40.0
 #: Per-provider budget for a live API key verification request.
 CREDENTIAL_CHECK_TIMEOUT_SECONDS = 12.0
 
-#: Providers the credentials probe lists by their *endpoint URL* rather than a
-#: key (``OPENAI_BASE_URL`` / ``OLLAMA_BASE_URL`` / ``VLLM_BASE_URL``). Their
-#: "raw_key" is that URL: verification must call the endpoint, not treat the
-#: URL as an API key.
-_ENDPOINT_PROVIDERS = frozenset({"custom", "ollama", "vllm"})
-
 #: Metadata keys that carry credential material. The console UI needs them to
 #: prefill its settings form; an MCP caller is an LLM context and must never
 #: see them.
@@ -371,52 +365,21 @@ async def _handle_launch_avd(
 
 
 async def _verify_credentials(cred_result: ProbeResult | None) -> list[dict[str, Any]]:
-    """Check every configured key against its provider; the keys never leave this function."""
-    if cred_result is None:
-        return []
-    metadata = cred_result.metadata
-    api_keys = metadata.get("api_keys") or {}
-    targets: list[tuple[str, str, str]] = []
-    for entry in metadata.get("providers") or []:
-        provider = str(entry.get("provider") or "").strip()
-        raw_key = entry.get("raw_key") or api_keys.get(provider) or ""
-        if not provider or not raw_key:
-            continue
-        targets.append((provider, str(entry.get("label") or provider), str(raw_key)))
-    if api_keys.get("ocr"):
-        targets.append(("ocr", "Vision OCR", str(api_keys["ocr"])))
-    if not targets:
-        return []
+    """Verify the configured service without putting credentials in probe metadata."""
+    from artemis.config import settings
 
-    outcomes = await asyncio.gather(
-        *(
-            validate_api_key(
-                provider,
-                "EMPTY",
-                base_url=key,
-                timeout=CREDENTIAL_CHECK_TIMEOUT_SECONDS,
-            )
-            if provider in _ENDPOINT_PROVIDERS
-            else validate_api_key(provider, key, timeout=CREDENTIAL_CHECK_TIMEOUT_SECONDS)
-            for provider, _label, key in targets
-        ),
-        return_exceptions=True,
-    )
-    verified: list[dict[str, Any]] = []
-    for (provider, label, key), outcome in zip(targets, outcomes):
-        if isinstance(outcome, BaseException):
-            valid, message = False, f"verification raised {outcome.__class__.__name__}: {outcome}"
-        else:
-            valid, message = bool(outcome[0]), str(outcome[1])
-        verified.append(
-            {
-                "provider": provider,
-                "label": label,
-                "valid": valid,
-                "message": message.replace(key, "***"),
-            }
-        )
-    return verified
+    secret = settings.get_api_key("openai")
+    if cred_result is None or not secret:
+        return []
+    key = secret.get_secret_value()
+    try:
+        valid, message = await validate_api_key("openai", key, timeout=CREDENTIAL_CHECK_TIMEOUT_SECONDS)
+    except Exception as exc:
+        valid, message = False, f"verification raised {type(exc).__name__}: {exc}"
+    return [{
+        "provider": "openai", "label": "OpenAI-compatible service",
+        "valid": bool(valid), "message": str(message).replace(key, "***"),
+    }]
 
 
 def _primary_credential(credentials: list[dict[str, Any]] | None) -> dict[str, Any] | None:

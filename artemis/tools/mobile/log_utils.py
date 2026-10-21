@@ -55,6 +55,9 @@ def resolve_time(
     if time_input is None:
         return None, None
 
+    if isinstance(time_input, str):
+        time_input = time_input.strip()
+
     if isinstance(time_input, (int, float)) or (
         isinstance(time_input, str) and time_input.replace(".", "", 1).isdigit()
     ):
@@ -72,11 +75,33 @@ def resolve_time(
         dt = datetime.fromtimestamp(abs_ts)
         return formatted_str, dt
 
-    # Assume it's absolute time string "MM-DD HH:MM:SS.ms"
+    # Clock-only queries refer to the day nearest the session start, including
+    # adjacent days for sessions spanning midnight rather than the host's today.
+    for fmt in ("%H:%M:%S.%f", "%H:%M:%S"):
+        try:
+            clock = datetime.strptime(str(time_input), fmt)
+        except ValueError:
+            continue
+        reference = (
+            datetime.fromtimestamp(session_start) if session_start is not None else datetime.now()
+        )
+        dt = reference.replace(
+            hour=clock.hour, minute=clock.minute, second=clock.second, microsecond=clock.microsecond
+        )
+        if dt - reference > timedelta(hours=12):
+            dt -= timedelta(days=1)
+        elif reference - dt > timedelta(hours=12):
+            dt += timedelta(days=1)
+        return dt.strftime("%m-%d %H:%M:%S.%f")[:-3], dt
+
+    # Absolute logcat timestamp: "MM-DD HH:MM:SS[.ms]".
     try:
         dt = parse_log_time(str(time_input))
     except ValueError as e:
-        raise ValueError(f"Unsupported time format: {time_input}") from e
+        raise ValueError(
+            f"Unsupported time format: {time_input!r}. Use 'MM-DD HH:MM:SS[.ms]', "
+            "'HH:MM:SS[.ms]' (nearest session date), or seconds since session start."
+        ) from e
     return str(time_input), dt
 
 

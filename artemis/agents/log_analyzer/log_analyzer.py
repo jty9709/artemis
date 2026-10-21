@@ -58,6 +58,8 @@ from third_party.mobile_use.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+_MAX_CONSECUTIVE_TOOL_FAILURES = 3
+
 
 class LogAnalyzerNode:
     def __init__(self, ctx: ArtemisContext):
@@ -179,6 +181,7 @@ class LogAnalyzerNode:
         agent_name: str = "Agent",
     ) -> str:
         outcome = "No result"
+        failed_rounds = 0
 
         for i in range(max_iterations):
             if i == max_iterations - 1:
@@ -293,6 +296,17 @@ class LogAnalyzerNode:
 
             for tm in tool_outputs:
                 current_messages.append(tm)
+
+            if tool_outputs and all(is_tool_failure(tm) for tm in tool_outputs):
+                failed_rounds += 1
+                if failed_rounds >= _MAX_CONSECUTIVE_TOOL_FAILURES:
+                    return ToolFailure(
+                        f"{agent_name} stopped after {failed_rounds} consecutive tool-failure "
+                        f"rounds. Analysis is incomplete; return control to the caller. "
+                        f"Last failure: {tool_outputs[-1].content}"
+                    )
+            elif tool_outputs:
+                failed_rounds = 0
 
         return outcome
 

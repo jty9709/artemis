@@ -34,47 +34,45 @@ def test_extract_error_message():
 
 @pytest.mark.asyncio
 async def test_validate_empty_and_placeholder():
-    is_valid, msg = await validate_api_key("google", "")
+    is_valid, msg = await validate_api_key("openai", "")
     assert not is_valid
     assert "empty" in msg.lower()
 
-    is_valid, msg = await validate_api_key("google", "API_KEY")
+    is_valid, msg = await validate_api_key("openai", "API_KEY")
     assert not is_valid
-    assert "placeholder" in msg.lower()
+    assert "real" in msg.lower()
 
 
 @pytest.mark.asyncio
-async def test_validate_gemini_success():
+async def test_validate_configured_service_success():
     with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
         mock_resp = MagicMock()
         mock_resp.status_code = 200
+        mock_resp.json.return_value = {"data": [{"id": "unit-test-vision"}]}
         mock_get.return_value = mock_resp
 
-        is_valid, msg = await validate_api_key("google", "valid_key_12345")
+        is_valid, msg = await validate_api_key("openai", "valid_key_12345")
         assert is_valid
-        assert "verified successfully" in msg
+        assert "verified" in msg
 
 
 @pytest.mark.asyncio
-async def test_validate_gemini_failure():
+async def test_validate_configured_service_failure():
     with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
         mock_resp = MagicMock()
         mock_resp.status_code = 400
         mock_resp.json.return_value = {"error": {"message": "API key not valid."}}
         mock_get.return_value = mock_resp
 
-        is_valid, msg = await validate_api_key("google", "bad_key_12345")
+        is_valid, msg = await validate_api_key("openai", "bad_key_12345")
         assert not is_valid
         assert "API key not valid" in msg
 
 
 @pytest.mark.asyncio
-async def test_validate_ocr_success():
+async def test_separate_google_credentials_are_disabled():
     with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_post.return_value = mock_resp
-
-        is_valid, msg = await validate_api_key("ocr", "valid_ocr_key_12345")
-        assert is_valid
-        assert "verified successfully" in msg
+        is_valid, msg = await validate_api_key("ocr", "unused-ocr-key")
+        assert not is_valid
+        assert "Only the configured" in msg
+        mock_post.assert_not_awaited()

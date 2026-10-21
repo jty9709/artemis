@@ -871,26 +871,15 @@ invoke_llm_with_timeout_message = LLMWaitNotice(
 
 
 # Backward compatible factory functions delegating to ModelFactory
-def get_google_llm(
-    model_name: str = "gemini-3.8-flash",
+def get_configured_llm(
     temperature: float | None = None,
     timeout: float | None = None,
-    thinking_budget: int | None = None,
-    thinking_level: str | None = "medium",
-    include_thoughts: bool | None = None,
-    enable_grounding: bool = False,
 ) -> BaseChatModel:
-    ep = ModelEndpoint(
-        provider=ModelProvider.GOOGLE,
-        model_name=model_name,
+    """Create a raw model for memory lenses from the single configured service."""
+    return ModelFactory.get_model(ModelEndpoint(
         temperature=temperature or 0.0,
         timeout_seconds=timeout or 60.0,
-        thinking_budget=thinking_budget,
-        thinking_level=thinking_level,
-        include_thoughts=include_thoughts,
-        enable_grounding=enable_grounding,
-    )
-    return ModelFactory.create_model(ep)
+    ))
 
 
 def _resolve_endpoint(
@@ -923,10 +912,10 @@ def _resolve_endpoint(
         val = getattr(obj, attr, None)
         return val if isinstance(val, expected_type) else None
 
-    provider_val = getattr(cfg, "provider", "google")
-    model_val = getattr(cfg, "model", "gemini-2.5-flash")
+    provider_val = getattr(cfg, "provider", "openai")
+    model_val = settings.OPENAI_MODEL
 
-    return ModelEndpoint(
+    return ModelFactory.resolve_endpoint(ModelEndpoint(
         provider=ModelProvider.from_string(provider_val),
         model_name=str(model_val),
         temperature=_get_val(cfg, "temperature", (int, float)) or 0.0,
@@ -936,7 +925,7 @@ def _resolve_endpoint(
         reasoning_effort=_get_val(cfg, "reasoning_effort", str),
         include_thoughts=_get_val(cfg, "include_thoughts", bool),
         enable_grounding=_get_val(cfg, "enable_grounding", bool) or False,
-    )
+    ))
 
 
 def _get_llm(

@@ -15,7 +15,7 @@
 from datetime import datetime
 from unittest.mock import Mock, patch
 from artemis.context import ArtemisContext
-from artemis.tools.mobile.log_utils import fetch_and_filter_logs
+from artemis.tools.mobile.log_utils import fetch_and_filter_logs, resolve_time
 import pytest
 
 
@@ -114,3 +114,73 @@ def test_fetch_and_filter_logs_until_time(
     mock_device.shell.assert_called_once_with("logcat -v threadtime -t 100")
     assert "line old" in result
     assert "line new" not in result
+
+
+@pytest.mark.parametrize(
+    "clock, session_date, expected",
+    [
+        ("17:15:00.000", datetime(2026, 10, 20, 16), datetime(2026, 10, 20, 17, 15)),
+        ("17:14:30.000", datetime(2026, 10, 20, 16), datetime(2026, 10, 20, 17, 14, 30)),
+        ("17:17:20", datetime(2026, 10, 20, 16), datetime(2026, 10, 20, 17, 17, 20)),
+        (" 17:17:20.123 ", datetime(2026, 10, 20, 16), datetime(2026, 10, 20, 17, 17, 20, 123000)),
+        ("00:01:00", datetime(2026, 12, 31, 23, 59), datetime(2027, 1, 1, 0, 1)),
+        ("23:59:00", datetime(2027, 1, 1, 0, 1), datetime(2026, 12, 31, 23, 59)),
+    ],
+)
+def test_resolve_clock_time_uses_session_date(clock, session_date, expected):
+    formatted, resolved = resolve_time(clock, session_date.timestamp())
+
+    assert resolved == expected
+    assert formatted == expected.strftime("%m-%d %H:%M:%S.%f")[:-3]
+
+
+@pytest.mark.parametrize("seconds", ["15.5", 15.5])
+def test_resolve_time_keeps_relative_seconds(seconds):
+    start = datetime(2026, 10, 20, 16).timestamp()
+    assert resolve_time(seconds, start) == (
+        "10-20 16:00:15.500",
+        datetime(2026, 10, 20, 16, 0, 15, 500000),
+    )
+
+
+def test_resolve_time_keeps_absolute_logcat_timestamps():
+    with patch("artemis.tools.mobile.log_utils.datetime", wraps=datetime) as clock:
+        clock.now.return_value = datetime(2026, 10, 21)
+        assert resolve_time("10-20 17:15:00.123", None) == (
+            "10-20 17:15:00.123",
+            datetime(2026, 10, 20, 17, 15, 0, 123000),
+        )
+
+
+def test_resolve_clock_without_session_uses_nearest_current_date():
+    with patch("artemis.tools.mobile.log_utils.datetime", wraps=datetime) as clock:
+        clock.now.return_value = datetime(2026, 10, 21, 0, 1)
+        assert resolve_time("23:59:00", None) == (
+            "10-20 23:59:00.000",
+            datetime(2026, 10, 20, 23, 59),
+        )
+
+
+@pytest.mark.parametrize("value", ["25:00:00", "17:15", "yesterday"])
+def test_resolve_time_rejects_invalid_input_with_format_guidance(value):
+    with pytest.raises(ValueError, match="Use .*HH:MM:SS"):
+        resolve_time(value, datetime(2026, 10, 20, 16).timestamp())
+
+
+@patch("artemis.tools.mobile.log_utils.get_adb_device")
+def test_fetch_and_filter_logs_accepts_original_failed_clock_arguments(
+    mock_get_adb_device, mock_context, mock_device
+):
+    mock_context.data_engine.session_start_time = datetime(2026, 10, 20, 16).timestamp()
+    mock_get_adb_device.return_value = mock_device
+    mock_device.shell.return_value = (
+        "10-20 17:14:59.999 before\n10-20 17:15:00.001 wanted\n10-20 17:17:20.001 after\n"
+    )
+    with patch("artemis.tools.mobile.log_utils.datetime", wraps=datetime) as clock:
+        clock.now.return_value = datetime(2026, 10, 21)
+        result = fetch_and_filter_logs(
+            mock_context, since_time="17:15:00.000", until_time="17:17:20"
+        )
+
+    mock_device.shell.assert_called_once_with('logcat -v threadtime -t "10-20 17:15:00.000"')
+    assert result == "10-20 17:15:00.001 wanted"

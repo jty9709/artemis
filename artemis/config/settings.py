@@ -108,6 +108,8 @@ class Settings(BaseSettings):
 
     # Custom Provider Endpoints
     OPENAI_BASE_URL: str | None = None
+    OPENAI_MODEL: str = ""
+    ARTEMIS_OCR_ENABLED: bool = False
 
     # Android ADB Connectivity
     ADB_HOST: str | None = Field(default=DEFAULT_ADB_HOST)

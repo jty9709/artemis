@@ -371,7 +371,8 @@ async def test_mobile_get_device_state_hierarchy_without_ocr():
 
 @pytest.mark.asyncio
 async def test_mobile_inspect_trace_invalid_action():
-    res = await mobile_inspect_trace(action="invalid_action", trace_id="trace-123")
+    with patch("mcp_server.tools.inspect_trace.os.path.exists", return_value=True):
+        res = await mobile_inspect_trace(action="invalid_action", trace_id="trace-123")
     assert "error" in res
     assert "not supported" in res["message"]
 

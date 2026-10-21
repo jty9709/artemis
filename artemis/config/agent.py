@@ -1089,7 +1089,9 @@ def load_agent_config(
 
     try:
         with open(resolved_path, encoding="utf-8") as f:
-            data = load_jsonc(f)
+            from artemis.config.core.interpolator import interpolate_config_value
+
+            data = interpolate_config_value(load_jsonc(f))
             if isinstance(data, dict) and "agent" in data:
                 return AgentGlobalConfig.model_validate(data["agent"])
             return AgentGlobalConfig.model_validate(data)

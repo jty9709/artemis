@@ -810,93 +810,52 @@ def test_launch_avd_failure_is_required_step(temp_trace_env):
 # --------------------------------------------------------------------------- #
 
 
-def test_verify_credentials_reports_every_provider_without_leaking_keys(temp_trace_env):
+def test_verify_credentials_reports_only_configured_service_without_leaking_keys(temp_trace_env):
     validate = AsyncMock(return_value=(True, "verified"))
     result = _run(_healthy_probes(), validate=validate, verify_credentials=True)
-
     assert result["verdict"] == "ready"
-    assert result["credentials"] == [
-        {"provider": "google", "label": "Gemini", "valid": True, "message": "verified"},
-        {"provider": "openai", "label": "ChatGPT", "valid": True, "message": "verified"},
-        {"provider": "ocr", "label": "Vision OCR", "valid": True, "message": "verified"},
-    ]
-    called = {call.args[0]: call.args[1] for call in validate.await_args_list}
-    assert called == {"google": "SECRET-GOOGLE", "openai": "SECRET-OPENAI", "ocr": "SECRET-OCR"}
-    assert all(call.kwargs["timeout"] == 12.0 for call in validate.await_args_list)
+    assert result["credentials"] == [{
+        "provider": "openai", "label": "OpenAI-compatible service", "valid": True, "message": "verified",
+    }]
+    validate.assert_awaited_once_with("openai", "unit-test-key", timeout=12.0)
+    assert "unit-test-key" not in repr(result)
     assert "SECRET" not in repr(result)
 
 
-def test_verify_credentials_calls_endpoint_providers_by_url(temp_trace_env):
-    """A custom / Ollama / vLLM entry carries its base URL as the "key": the
-    check must hit that endpoint (no auth header) instead of validating the
-    URL as if it were an API key."""
+def test_verify_credentials_ignores_legacy_provider_urls(temp_trace_env):
     validate = AsyncMock(return_value=(True, "verified"))
-    cred = _probe(
-        "gemini_api_key",
-        ProbeStatus.PASS,
-        category=ProbeCategory.CREDENTIALS,
-        metadata={
-            "providers": [
-                {
-                    "provider": "ollama",
-                    "label": "Local Ollama",
-                    "raw_key": "http://localhost:11434/v1",
-                },
-                {"provider": "google", "label": "Gemini", "raw_key": "SECRET-GOOGLE"},
-            ],
-            "api_keys": {},
-        },
-    )
+    cred = _probe("gemini_api_key", ProbeStatus.PASS, category=ProbeCategory.CREDENTIALS,
+        metadata={"providers": [
+            {"provider": "ollama", "raw_key": "http://wrong.example/v1"},
+            {"provider": "google", "raw_key": "SECRET-GOOGLE"},
+        ]})
     probes = [p for p in _healthy_probes() if p.id != "gemini_api_key"] + [cred]
     _run(probes, validate=validate, verify_credentials=True)
-
-    calls = {call.args[0]: call for call in validate.await_args_list}
-    assert calls["ollama"].args[1] == "EMPTY"
-    assert calls["ollama"].kwargs["base_url"] == "http://localhost:11434/v1"
-    assert calls["google"].args[1] == "SECRET-GOOGLE"
-    assert "base_url" not in calls["google"].kwargs
+    validate.assert_awaited_once_with("openai", "unit-test-key", timeout=12.0)
 
 
 def test_invalid_primary_credential_blocks_and_redacts_message(temp_trace_env):
     async def _validate(provider, api_key, timeout=12.0):
-        if provider == "google":
-            return False, f"Gemini API verification failed (400): key {api_key} invalid"
-        if provider == "ocr":
-            raise RuntimeError("boom SECRET-OCR")
-        return True, "ok"
-
-    result = _run(
-        _healthy_probes(),
-        host=_host(env_file="/home/u/.env"),
-        validate=AsyncMock(side_effect=_validate),
-        verify_credentials=True,
-    )
-
+        return False, f"Configured service rejected key {api_key}"
+    result = _run(_healthy_probes(), host=_host(env_file="/home/u/.env"),
+        validate=AsyncMock(side_effect=_validate), verify_credentials=True)
     assert result["verdict"] == "blocked"
+    assert "unit-test-key" not in repr(result)
     assert "SECRET" not in repr(result)
-    google, openai, ocr = result["credentials"]
-    assert google["valid"] is False and "***" in google["message"]
-    assert openai["valid"] is True
-    assert ocr["valid"] is False and ocr["message"].startswith("verification raised RuntimeError")
-    steps = result["next_steps"]
-    required = next(s for s in steps if s.startswith("[REQUIRED] Gemini API key (google)"))
-    assert "failed live verification" in required
-    assert steps[steps.index(required) + 1].startswith("  Ask the user to add a provider key")
-    assert any("/home/u/.env" in s for s in steps)
-    assert any(s.startswith("[OPTIONAL] Vision OCR API key (ocr)") for s in steps)
-    assert steps[-1].startswith("After changing the env file")
-    assert "Gemini key verification" in result["summary"]
+    credential, = result["credentials"]
+    assert credential["provider"] == "openai"
+    assert credential["valid"] is False and "***" in credential["message"]
+    assert any("failed live verification" in step for step in result["next_steps"])
+    assert any("/home/u/.env" in step for step in result["next_steps"])
 
 
-def test_invalid_secondary_credential_only_degrades(temp_trace_env):
+def test_unused_secondary_credentials_do_not_degrade_single_service(temp_trace_env):
     async def _validate(provider, api_key, timeout=12.0):
-        return (provider != "openai", "ok" if provider != "openai" else "401 unauthorized")
-
-    result = _run(
-        _healthy_probes(), validate=AsyncMock(side_effect=_validate), verify_credentials=True
-    )
-    assert result["verdict"] == "degraded"
-    assert any(s.startswith("[OPTIONAL] ChatGPT API key (openai)") for s in result["next_steps"])
+        return provider == "openai", "ok" if provider == "openai" else "401 unauthorized"
+    validate = AsyncMock(side_effect=_validate)
+    result = _run(_healthy_probes(), validate=validate, verify_credentials=True)
+    assert result["verdict"] == "ready"
+    validate.assert_awaited_once_with("openai", "unit-test-key", timeout=12.0)
 
 
 # --------------------------------------------------------------------------- #
