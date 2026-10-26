@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 from typing import Any
 
 import httpx
@@ -31,75 +30,75 @@ def get_http_client() -> httpx.AsyncClient:
 
 
 def is_ocr_configured() -> bool:
-    """Checks if a valid Google Vision OCR API key is configured."""
-    ocr_secret = settings.get_api_key("ocr")
-    if ocr_secret and ocr_secret.get_secret_value().strip():
-        val = ocr_secret.get_secret_value().strip()
-        if val not in ("API_KEY", "your_google_cloud_vision_api_key_here"):
-            return True
-    for env_var in ("OCR_API_KEY", "VISION_API_KEY"):
-        val = os.environ.get(env_var)
-        if (
-            val
-            and val.strip()
-            and val.strip() not in ("API_KEY", "your_google_cloud_vision_api_key_here")
-        ):
-            return True
-    return False
+    """OCR shares the same vision model and credentials as the mobile agent."""
+    return bool(
+        settings.ARTEMIS_OCR_ENABLED
+        and settings.OPENAI_BASE_URL
+        and settings.OPENAI_API_KEY
+        and settings.OPENAI_MODEL
+    )
 
 
 async def perform_ocr(
     screenshot_b64: str,
     client: httpx.AsyncClient | None = None,
 ) -> list[dict[str, Any]]:
-    """Calls Google Vision API for text recognition on an image.
-
-    Args:
-        screenshot_b64: Base64 encoded screenshot image.
-        client: Optional persistent httpx.AsyncClient.
-
-    Returns:
-        A list of dictionaries containing detected text and position vertices.
-    """
-    ocr_secret = settings.get_api_key("ocr")
-    api_key = (
-        (ocr_secret.get_secret_value() if ocr_secret else None)
-        or os.environ.get("OCR_API_KEY")
-        or os.environ.get("VISION_API_KEY")
-    )
-    if not api_key:
+    """Read text and pixel coordinates through the configured vision model."""
+    if not is_ocr_configured():
         return []
+    from artemis.llm.router import ModelEndpoint, ModelFactory
+    from artemis.llm.structured import parse_structured
 
-    url = f"https://vision.googleapis.com/v1/images:annotate?key={api_key}"
-    headers = {"Content-Type": "application/json"}
-    data = {
-        "requests": [
-            {
-                "image": {"content": screenshot_b64},
-                "features": [{"type": "TEXT_DETECTION"}],
-            }
-        ]
-    }
+    import base64
+    import io
+    from PIL import Image
 
+    image_bytes = base64.b64decode(screenshot_b64)
+    image = Image.open(io.BytesIO(image_bytes))
+    width, height = image.size
+    mime_type = Image.MIME[image.format]
+    endpoint = ModelFactory.resolve_endpoint(ModelEndpoint())
+    prompt = (
+        f"The original screenshot is {width} pixels wide and {height} pixels high. "
+        "Read every visible text label in this screenshot. Return only a JSON array "
+        'of objects with "text" and "position". "position" must contain four '
+        'vertices {"x": integer, "y": integer} in clockwise order, using original '
+        "image pixel coordinates. Return [] if there is no visible text."
+    )
     active_client = client if client is not None else get_http_client()
-    response = await active_client.post(url, json=data, headers=headers, timeout=30.0)
-    return _parse_ocr_response(response)
-
-
-def _parse_ocr_response(response: httpx.Response) -> list[dict[str, Any]]:
-    if response.status_code == 200:
-        res_json = response.json()
-        responses = res_json.get("responses", [])
-        if responses and "textAnnotations" in responses[0]:
-            annotations = responses[0]["textAnnotations"]
-            results = []
-            # Skip the first annotation (index 0) as it is the full-screen combined text
-            for ann in annotations[1:]:
-                desc = ann.get("description", "")
-                vertices = ann.get("boundingPoly", {}).get("vertices", [])
-                results.append({"text": desc, "position": vertices})
-            return results
-        else:
-            return []
-    else:
-        raise Exception(f"Vision API returned status {response.status_code}: {response.text}")
+    response = await active_client.post(
+        endpoint.api_base + "/chat/completions",
+        headers={"Authorization": "Bearer " + endpoint.api_key},
+        json={
+            "model": endpoint.model_name,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime_type};base64," + screenshot_b64},
+                        },
+                    ],
+                }
+            ],
+        },
+        timeout=30.0,
+    )
+    response.raise_for_status()
+    result = parse_structured(response.json()["choices"][0]["message"]["content"])
+    if not isinstance(result, list):
+        raise ValueError("OCR model did not return a JSON array")
+    return [
+        item
+        for item in result
+        if isinstance(item, dict)
+        and isinstance(item.get("text"), str)
+        and isinstance(item.get("position"), list)
+        and len(item["position"]) == 4
+        and all(
+            isinstance(v, dict) and isinstance(v.get("x"), int) and isinstance(v.get("y"), int)
+            for v in item["position"]
+        )
+    ]

@@ -16,6 +16,7 @@
 
 from pathlib import Path
 from typing import Any
+from pydantic import model_validator
 
 
 from artemis.config.constants import (
@@ -23,6 +24,8 @@ from artemis.config.constants import (
     AgentNode,
 )
 from artemis.config.paths import ROOT_DIR, get_config_path
+from artemis.config.settings import settings
+from artemis.config.core.interpolator import interpolate_config_value
 from artemis.utils.cython_compat import CyFunctionDetector
 from third_party.mobile_use.config import llm as base_llm_config
 from third_party.mobile_use.config.llm import (
@@ -58,15 +61,14 @@ __all__ = [
 
 
 def lightweight_judge_default() -> "LLMWithFallback":
-    """Factory default for the lightweight judge nodes (pixel safety net and
-    planner validation): a flash-lite model at temperature 0."""
+    """Use the configured model for pixel verification and planner validation."""
     return LLMWithFallback(
-        provider="google",
-        model="gemini-3.5-flash-lite",
+        provider="openai",
+        model=settings.OPENAI_MODEL,
         temperature=0.0,
         fallback=LLM(
-            provider="google",
-            model="gemini-3.1-flash-lite",
+            provider="openai",
+            model=settings.OPENAI_MODEL,
             temperature=0.0,
         ),
     )
@@ -91,8 +93,33 @@ class LLMConfig(LLMConfigBase):
     planner_validation: LLMWithFallback | None = None
     output_analyzer: LLMWithFallback | None = None
 
+    @model_validator(mode="after")
+    def use_configured_openai_model(self) -> "LLMConfig":
+        """All roles and fallbacks share the endpoint configured in .env.
+
+        Apply after validation so legacy profile overrides cannot restore a
+        second provider or a hard-coded auxiliary model.
+        """
+        roles = [getattr(self, name) for name in type(self).model_fields if name != "utils"]
+        roles.extend(getattr(self.utils, name) for name in type(self.utils).model_fields)
+        for role in roles:
+            if not isinstance(role, LLMWithFallback):
+                continue
+            for model in (role, role.fallback):
+                model.provider = "openai"
+                model.model = settings.OPENAI_MODEL
+                model.thinking_budget = None
+                model.thinking_level = None
+                model.include_thoughts = None
+                model.enable_grounding = False
+        return self
+
     def validate_providers(self) -> None:
         """Validate credentials across all configured agent nodes."""
+        if not settings.OPENAI_BASE_URL:
+            raise ValueError("Configure OPENAI_BASE_URL in .env")
+        if not settings.OPENAI_MODEL.strip():
+            raise ValueError("Configure OPENAI_MODEL in .env")
         super().validate_providers()
         self.summarizer.validate_provider("Summarizer")
         self.operator.validate_provider("Operator")
@@ -138,11 +165,11 @@ def _expand_default_into_nodes(config_dict: dict) -> dict:
     default_model_cfg = config_dict.get(
         "default",
         {
-            "provider": "google",
-            "model": "gemini-3.8-flash",
+            "provider": "openai",
+            "model": settings.OPENAI_MODEL,
             "fallback": {
-                "provider": "google",
-                "model": "gemini-3.7-flash",
+                "provider": "openai",
+                "model": settings.OPENAI_MODEL,
             },
         },
     )
@@ -212,7 +239,7 @@ def parse_llm_config() -> LLMConfig:
 
     try:
         with open(config_path, encoding="utf-8") as f:
-            config_dict = load_jsonc(f)
+            config_dict = interpolate_config_value(load_jsonc(f))
             expanded_dict = _expand_default_into_nodes(config_dict)
             return LLMConfig.model_validate(expanded_dict)
     except Exception as e:

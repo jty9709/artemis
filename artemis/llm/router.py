@@ -12,12 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Dynamic Multi-Provider Model Router for ARTEMIS.
-
-Provides role-based LLM/VLM dispatching, dynamic fallback chains,
-and unified provider configuration across Gemini, Vertex AI, OpenAI,
-Anthropic, OpenRouter, and local Ollama/vLLM endpoints.
-"""
+"""Single OpenAI-compatible model router for all ARTEMIS execution paths."""
 
 from enum import StrEnum
 import hashlib
@@ -28,10 +23,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from pydantic import BaseModel, Field
 
 from artemis.config.settings import settings
-from artemis.llm.google.provider import supports_thinking_level
-from third_party.mobile_use.utils.logger import get_logger
 
-logger = get_logger(__name__)
 
 
 class ModelProvider(StrEnum):
@@ -50,17 +42,17 @@ class ModelProvider(StrEnum):
     def from_string(cls, val: Any) -> "ModelProvider":
         """Converts a string or enum into a canonical ModelProvider.
 
-        ``None``/empty means "use the default" (Google); an unrecognized
+        ``None``/empty means "use the default" (OpenAI); an unrecognized
         non-empty value raises instead of silently routing to Gemini with
         the wrong credentials.
         """
         if isinstance(val, cls):
             return val
         if val is None:
-            return cls.GOOGLE
+            return cls.OPENAI
         s = str(val).lower().replace("_", "").replace("-", "").strip()
         if not s:
-            return cls.GOOGLE
+            return cls.OPENAI
         mapping = {
             "google": cls.GOOGLE,
             "gemini": cls.GOOGLE,
@@ -87,9 +79,9 @@ class ModelProvider(StrEnum):
 class ModelEndpoint(BaseModel):
     """Configuration definition for an LLM/VLM model endpoint."""
 
-    provider: ModelProvider = Field(default=ModelProvider.GOOGLE, description="Model provider")
-    model_name: str = Field(default="gemini-2.5-flash", description="Model name identifier")
-    api_key: str | None = Field(default=None, description="API Key or secret")
+    provider: ModelProvider = Field(default=ModelProvider.OPENAI, description="Model provider")
+    model_name: str = Field(default="", description="Model name identifier")
+    api_key: str | None = Field(default=None, repr=False, description="API Key or secret")
     api_base: str | None = Field(default=None, description="Custom API endpoint base URL")
     temperature: float = Field(default=0.0, description="Sampling temperature")
     max_tokens: int | None = Field(default=None, description="Maximum completion tokens")
@@ -133,75 +125,36 @@ class ModelEndpoint(BaseModel):
         )
 
 
-def _patch_langchain_google_genai():
-    """Patches ChatGoogleGenerativeAI._process_tool_config to preserve and ensure include_server_side_tool_invocations."""
-    try:
-        from langchain_google_genai.chat_models import ChatGoogleGenerativeAI
-        from google.genai.types import ToolConfig
-
-        if getattr(ChatGoogleGenerativeAI, "_is_artemis_patched", False):
-            return
-
-        original_process = ChatGoogleGenerativeAI._process_tool_config
-
-        def patched_process_tool_config(self, tool_choice, tool_config, formatted_tools):
-            config = original_process(self, tool_choice, tool_config, formatted_tools)
-
-            has_builtin = False
-            has_functions = False
-            if formatted_tools:
-                for tool in formatted_tools:
-                    tool_dict = tool if isinstance(tool, dict) else getattr(tool, "__dict__", {})
-                    if any(
-                        tool_dict.get(k) is not None
-                        for k in (
-                            "google_search",
-                            "code_execution",
-                            "google_maps",
-                            "google_search_retrieval",
-                        )
-                    ):
-                        has_builtin = True
-                    if tool_dict.get("function_declarations"):
-                        has_functions = True
-
-            if tool_config:
-                normalized = (
-                    ToolConfig.model_validate(tool_config)
-                    if isinstance(tool_config, dict)
-                    else tool_config
-                )
-                if getattr(normalized, "include_server_side_tool_invocations", None) is not None:
-                    if config is None:
-                        config = ToolConfig(
-                            include_server_side_tool_invocations=normalized.include_server_side_tool_invocations
-                        )
-                    else:
-                        config.include_server_side_tool_invocations = (
-                            normalized.include_server_side_tool_invocations
-                        )
-
-            if has_builtin and has_functions:
-                if config is None:
-                    config = ToolConfig(include_server_side_tool_invocations=True)
-                else:
-                    config.include_server_side_tool_invocations = True
-
-            return config
-
-        ChatGoogleGenerativeAI._process_tool_config = patched_process_tool_config
-        ChatGoogleGenerativeAI._is_artemis_patched = True
-    except Exception as e:
-        logger.warning(f"Could not patch ChatGoogleGenerativeAI._process_tool_config: {e}")
-
-
 class ModelFactory:
-    """Unified factory for instantiating and caching LangChain chat models across providers."""
+    """Every model request uses the single OpenAI-compatible endpoint."""
 
     _cache: dict[tuple, BaseChatModel] = {}
 
+    @staticmethod
+    def resolve_endpoint(endpoint: ModelEndpoint) -> ModelEndpoint:
+        """Override legacy provider/model choices, including auxiliary fallbacks."""
+        if not settings.OPENAI_BASE_URL or not settings.OPENAI_BASE_URL.strip():
+            raise ValueError("Configure OPENAI_BASE_URL in .env")
+        if not settings.OPENAI_MODEL.strip():
+            raise ValueError("Configure OPENAI_MODEL in .env")
+        if not settings.OPENAI_API_KEY:
+            raise ValueError("Configure OPENAI_API_KEY in .env")
+        return endpoint.model_copy(
+            update={
+                "provider": ModelProvider.OPENAI,
+                "model_name": settings.OPENAI_MODEL.strip(),
+                "api_base": settings.OPENAI_BASE_URL.strip().rstrip("/"),
+                "api_key": settings.OPENAI_API_KEY.get_secret_value(),
+                "thinking_budget": None,
+                "thinking_level": None,
+                "include_thoughts": None,
+                "enable_grounding": False,
+            }
+        )
+
     @classmethod
     def get_model(cls, endpoint: ModelEndpoint) -> BaseChatModel:
+        endpoint = cls.resolve_endpoint(endpoint)
         key = endpoint.cache_key()
         if key not in cls._cache:
             cls._cache[key] = cls.create_model(endpoint)
@@ -213,177 +166,21 @@ class ModelFactory:
             from artemis.llm.fake_model import FakeChatModel
 
             delay = float(os.environ.get("ARTEMIS_FAKE_LLM_DELAY_S", "0") or 0)
-            logger.warning(
-                f"ARTEMIS_FAKE_LLM=1 — returning FakeChatModel (delay={delay}s) "
-                f"instead of {endpoint.provider}/{endpoint.model_name}"
-            )
             return FakeChatModel(delay_s=delay)
 
-        provider = ModelProvider.from_string(endpoint.provider)
+        from langchain_openai import ChatOpenAI
 
-        if provider == ModelProvider.GOOGLE:
-            _patch_langchain_google_genai()
-            from langchain_google_genai import (
-                ChatGoogleGenerativeAI,
-                HarmBlockThreshold,
-                HarmCategory,
-            )
-
-            api_key = (
-                endpoint.api_key
-                or (settings.GOOGLE_API_KEY.get_secret_value() if settings.GOOGLE_API_KEY else None)
-                or os.environ.get("GOOGLE_API_KEY")
-                or os.environ.get("GEMINI_API_KEY")
-            )
-            # Gemini 1.x/2.x only understand thinking_budget.
-            thinking_level = (
-                endpoint.thinking_level if supports_thinking_level(endpoint.model_name) else None
-            )
-
-            kwargs: dict[str, Any] = {
-                "model": endpoint.model_name,
-                "temperature": endpoint.temperature,
-                "max_output_tokens": endpoint.max_tokens,
-                "api_key": api_key,
-                "timeout": endpoint.timeout_seconds,
-                "thinking_budget": endpoint.thinking_budget,
-                "thinking_level": thinking_level,
-                "include_thoughts": endpoint.include_thoughts,
-                "safety_settings": {
-                    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-                    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-                    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-                    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-                },
-            }
-            return ChatGoogleGenerativeAI(**{k: v for k, v in kwargs.items() if v is not None})
-
-        elif provider == ModelProvider.VERTEX_AI:
-            from langchain_google_vertexai import (
-                ChatVertexAI,
-                HarmBlockThreshold,
-                HarmCategory,
-            )
-
-            kwargs = {
-                "model_name": endpoint.model_name,
-                "temperature": endpoint.temperature,
-                "max_output_tokens": endpoint.max_tokens,
-                "timeout": endpoint.timeout_seconds,
-                "thinking_budget": endpoint.thinking_budget,
-                "safety_settings": {
-                    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-                    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-                    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-                    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-                },
-            }
-            return ChatVertexAI(**{k: v for k, v in kwargs.items() if v is not None})
-
-        elif provider == ModelProvider.OPENAI:
-            from langchain_openai import ChatOpenAI
-
-            api_key = (
-                endpoint.api_key
-                or (settings.OPENAI_API_KEY.get_secret_value() if settings.OPENAI_API_KEY else None)
-                or os.environ.get("OPENAI_API_KEY", "EMPTY")
-            )
-            base_url = endpoint.api_base or (
-                str(settings.OPENAI_BASE_URL) if settings.OPENAI_BASE_URL else None
-            )
-            kwargs = {
-                "model": endpoint.model_name,
-                "temperature": endpoint.temperature,
-                "max_tokens": endpoint.max_tokens,
-                "api_key": api_key,
-                "base_url": base_url,
-                "timeout": endpoint.timeout_seconds,
-            }
-            if endpoint.reasoning_effort:
-                kwargs["reasoning_effort"] = endpoint.reasoning_effort
-            return ChatOpenAI(**{k: v for k, v in kwargs.items() if v is not None})
-
-        elif provider == ModelProvider.ANTHROPIC:
-            from langchain_anthropic import ChatAnthropic
-
-            api_key = (
-                endpoint.api_key
-                or (
-                    settings.ANTHROPIC_API_KEY.get_secret_value()
-                    if settings.ANTHROPIC_API_KEY
-                    else None
-                )
-                or os.environ.get("ANTHROPIC_API_KEY")
-            )
-            kwargs = {
-                "model": endpoint.model_name,
-                "temperature": endpoint.temperature,
-                "api_key": api_key,
-                "timeout": endpoint.timeout_seconds,
-            }
-            budget = endpoint.thinking_budget
-            if not budget and endpoint.reasoning_effort:
-                effort_map = {"low": 2048, "medium": 8192, "high": 32768}
-                budget = effort_map.get(endpoint.reasoning_effort.lower())
-            if budget:
-                kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
-                kwargs["temperature"] = 1.0
-            return ChatAnthropic(**{k: v for k, v in kwargs.items() if v is not None})
-
-        elif provider == ModelProvider.OPENROUTER:
-            from langchain_openai import ChatOpenAI
-
-            api_key = (
-                endpoint.api_key
-                or (
-                    settings.OPEN_ROUTER_API_KEY.get_secret_value()
-                    if settings.OPEN_ROUTER_API_KEY
-                    else None
-                )
-                or os.environ.get("OPEN_ROUTER_API_KEY")
-            )
-            return ChatOpenAI(
-                model=endpoint.model_name,
-                temperature=endpoint.temperature,
-                api_key=api_key,
-                base_url=endpoint.api_base or "https://openrouter.ai/api/v1",
-                timeout=endpoint.timeout_seconds,
-            )
-
-        elif provider == ModelProvider.XAI:
-            from langchain_openai import ChatOpenAI
-
-            api_key = (
-                endpoint.api_key
-                or (settings.XAI_API_KEY.get_secret_value() if settings.XAI_API_KEY else None)
-                or os.environ.get("XAI_API_KEY")
-            )
-            return ChatOpenAI(
-                model=endpoint.model_name,
-                temperature=endpoint.temperature,
-                api_key=api_key,
-                base_url=endpoint.api_base or "https://api.x.ai/v1",
-                timeout=endpoint.timeout_seconds,
-            )
-
-        elif provider in (ModelProvider.OLLAMA, ModelProvider.VLLM, ModelProvider.CUSTOM):
-            from langchain_openai import ChatOpenAI
-
-            api_key = endpoint.api_key or os.environ.get("OPENAI_API_KEY", "EMPTY")
-            base_url = endpoint.api_base or os.environ.get(
-                "OPENAI_BASE_URL", "http://localhost:8000/v1"
-            )
-            kwargs = {
-                "model": endpoint.model_name,
-                "temperature": endpoint.temperature,
-                "max_tokens": endpoint.max_tokens,
-                "api_key": api_key,
-                "base_url": base_url,
-                "timeout": endpoint.timeout_seconds,
-            }
-            if endpoint.reasoning_effort:
-                kwargs["reasoning_effort"] = endpoint.reasoning_effort
-            return ChatOpenAI(**{k: v for k, v in kwargs.items() if v is not None})
-
-        else:
-            raise ValueError(f"Unsupported model provider: {provider}")
+        endpoint = cls.resolve_endpoint(endpoint)
+        kwargs = {
+            "model": endpoint.model_name,
+            "temperature": endpoint.temperature,
+            "max_tokens": endpoint.max_tokens,
+            "api_key": endpoint.api_key,
+            "base_url": endpoint.api_base,
+            "timeout": endpoint.timeout_seconds,
+            # OneAPI exposes Chat Completions, regardless of the model ID.
+            "use_responses_api": False,
+        }
+        if endpoint.reasoning_effort:
+            kwargs["reasoning_effort"] = endpoint.reasoning_effort
+        return ChatOpenAI(**{k: v for k, v in kwargs.items() if v is not None})

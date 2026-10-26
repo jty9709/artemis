@@ -22,7 +22,7 @@ import uuid
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
-from artemis.core.tool_failure import is_tool_failure
+from artemis.core.tool_failure import ToolFailure, is_tool_failure
 from artemis.context import ArtemisContext
 from artemis.data_engine.trace import (
     CURRENT_TRACE_ID,
@@ -58,6 +58,7 @@ from third_party.mobile_use.utils.logger import get_logger
 logger = get_logger(__name__)
 
 _MAX_ITERATIONS = 30
+_MAX_CONSECUTIVE_TOOL_FAILURES = 3
 
 _FINAL_TURN_WARNING = (
     "[WARNING] This is your final iteration. Call 'submit_answer' to provide your final diagnosis."
@@ -552,6 +553,7 @@ class Diagnoser:
 
         self.ctx.background_jobs = {}
         outcome = "No result"
+        failed_rounds = 0
 
         try:
             for i in range(_MAX_ITERATIONS):
@@ -583,9 +585,22 @@ class Diagnoser:
                     break
 
                 current_messages.append(response)
-                current_messages.extend(
-                    await self._execute_tool_calls(response.tool_calls, traced_tools, state)
+                tool_outputs = await self._execute_tool_calls(
+                    response.tool_calls, traced_tools, state
                 )
+                current_messages.extend(tool_outputs)
+                tool_messages = [tm for tm in tool_outputs if isinstance(tm, ToolMessage)]
+                if tool_messages and all(is_tool_failure(tm) for tm in tool_messages):
+                    failed_rounds += 1
+                    if failed_rounds >= _MAX_CONSECUTIVE_TOOL_FAILURES:
+                        outcome = ToolFailure(
+                            f"Diagnoser stopped after {failed_rounds} consecutive tool-failure "
+                            "rounds. Diagnosis is incomplete; return control to the caller. "
+                            f"Last failure: {tool_messages[-1].content}"
+                        )
+                        break
+                elif tool_messages:
+                    failed_rounds = 0
         finally:
             self._cancel_running_jobs()
 

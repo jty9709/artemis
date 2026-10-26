@@ -55,39 +55,32 @@ async def test_perform_ocr_returns_empty_list_when_unconfigured(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_perform_ocr_executes_api_call_when_configured():
-    """Verify perform_ocr makes API request and parses responses when configured."""
-    mock_key = MagicMock()
-    mock_key.get_secret_value.return_value = "test_key"
+async def test_perform_ocr_executes_api_call_when_configured(monkeypatch):
+    """OCR uses the configured chat service and keeps the existing result schema."""
+    import base64
+    import io
+    import json
+    from PIL import Image
+    from artemis.config import settings
 
-    with (
-        patch.object(Settings, "get_api_key", return_value=mock_key),
-        patch("artemis.utils.ocr_api.get_http_client") as mock_client,
-    ):
+    monkeypatch.setattr(settings, "ARTEMIS_OCR_ENABLED", True)
+    image = Image.new("RGB", (400, 300), "white")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    screenshot = base64.b64encode(buffer.getvalue()).decode()
+    labels = [{"text": "Login", "position": [
+        {"x": 100, "y": 200}, {"x": 300, "y": 200},
+        {"x": 300, "y": 250}, {"x": 100, "y": 250},
+    ]}]
+    with patch("artemis.utils.ocr_api.get_http_client") as mock_client:
         mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {
-            "responses": [
-                {
-                    "textAnnotations": [
-                        {"description": "Full text\nLogin", "boundingPoly": {}},
-                        {
-                            "description": "Login",
-                            "boundingPoly": {
-                                "vertices": [{"x": 100, "y": 200}, {"x": 300, "y": 250}]
-                            },
-                        },
-                    ]
-                }
-            ]
-        }
+        mock_resp.json.return_value = {"choices": [{"message": {"content": json.dumps(labels)}}]}
         mock_http = AsyncMock()
         mock_http.post.return_value = mock_resp
         mock_client.return_value = mock_http
-
-        result = await perform_ocr(screenshot_b64="dummy_b64")
-        assert len(result) == 1
-        assert result[0]["text"] == "Login"
+        result = await perform_ocr(screenshot_b64=screenshot)
+        assert result == labels
+        assert mock_http.post.call_args.args[0] == settings.OPENAI_BASE_URL + "/chat/completions"
 
 
 def test_fuse_ocr_with_xml_empty_ocr_retains_xml_pruning():

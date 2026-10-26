@@ -53,7 +53,7 @@ def test_video_analyzer_universal_engine_detection(mock_context):
     with patch.object(settings, "GOOGLE_API_KEY", None):
         agent = VideoAnalyzer(mock_context)
         assert agent.use_native_gemini is False
-        assert agent.model_name == "claude-3-7-sonnet"
+        assert agent.model_name == settings.OPENAI_MODEL
 
 
 def test_universal_tool_schemas():

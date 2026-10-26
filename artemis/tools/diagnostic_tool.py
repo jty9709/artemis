@@ -14,12 +14,13 @@
 
 """Universal diagnostic agent tool for deep system logs and video inspection."""
 
+import asyncio
 from typing import Any
 
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
-from artemis.core.tool_failure import ToolFailure
+from artemis.core.tool_failure import ToolFailure, is_tool_failure
 from artemis.agents.diagnoser.diagnoser import Diagnoser
 from artemis.context import ArtemisContext
 from artemis.data_engine.trace import trace_langchain_tool
@@ -31,6 +32,8 @@ from artemis.utils.cython_compat import CyFunctionDetector
 from third_party.mobile_use.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+_DIAGNOSIS_TIMEOUT_SECONDS = 120
 
 
 # pylint: disable=too-few-public-methods
@@ -56,12 +59,23 @@ async def _run_diagnoser_logic(
     if ctx is None:
         return ToolFailure("Error: ArtemisContext is required for Diagnoser.")
     agent = Diagnoser(ctx)
+    deadline = asyncio.timeout(_DIAGNOSIS_TIMEOUT_SECONDS)
     try:
-        result = await agent.run(query, state)
+        async with deadline:
+            result = await agent.run(query, state)
+        if is_tool_failure(result):
+            return result
         return f"Diagnoser replied:\n{result}"
+    except TimeoutError as e:
+        if not deadline.expired():
+            return ToolFailure(f"Diagnoser failed: {e or 'nested operation timed out'}")
+        return ToolFailure(
+            f"Diagnoser timed out after {_DIAGNOSIS_TIMEOUT_SECONDS} seconds. "
+            "Diagnosis is incomplete; return control to the caller."
+        )
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error(f"Failed to run diagnoser: {e}")
-        return f"Diagnoser failed: {e}"
+        return ToolFailure(f"Diagnoser failed: {e}")
 
 
 class AskDiagnoserTool(ArtemisTool):

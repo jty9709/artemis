@@ -28,10 +28,8 @@ import json
 import os
 from typing import Any, Literal
 
-from google import genai
 from google.genai import types
 
-from artemis.agents.explorer.constants import DEFAULT_EXPLORER_MODEL
 from artemis.agents.explorer.geometry import (
     FALLBACK_SCREEN_SIZE,
     is_valid_norm_point,
@@ -49,7 +47,6 @@ from artemis.config import settings
 from artemis.context import ArtemisContext
 from artemis.data_engine.trace import trace
 from artemis.graph.state import State
-from artemis.llm.google import is_gemini_model, strip_provider_prefix
 from artemis.utils.ocr_api import is_ocr_configured
 from third_party.mobile_use.utils.logger import get_logger
 
@@ -114,42 +111,15 @@ class Explorer(PerceptionToolsMixin, UniversalRunnerMixin, RunSetupMixin, Native
     # ------------------------------------------------------------------ #
 
     def _resolve_model_name(self) -> str:
-        """Returns the configured Explorer model name without a provider prefix."""
-        llm_config = getattr(self.ctx, "llm_config", None)
-        llm_cfg = getattr(llm_config, "explorer", None) if llm_config else None
-        model = getattr(llm_cfg, "model", None) if llm_cfg else None
-        model_name = model if isinstance(model, str) and model else DEFAULT_EXPLORER_MODEL
-        return strip_provider_prefix(model_name)
+        """Use the same model as the operator, memory and video analysis."""
+        return settings.OPENAI_MODEL
 
     def _detect_native_engine(self) -> bool:
-        """True when the native google-genai SDK should drive the reasoning loop.
-
-        A Gemini model alone is not enough: without a Google API key (or a
-        client already shared on the context) the SDK cannot be constructed,
-        so such configurations run through the universal LangChain engine.
-        """
-        if not is_gemini_model(self.model_name):
-            return False
-        if getattr(self.ctx, "_genai_client", None) is not None:
-            return True
-        api_key = getattr(settings, "GOOGLE_API_KEY", None)
-        return bool(api_key and api_key.get_secret_value())
+        """This installation always uses the OpenAI-compatible engine."""
+        return False
 
     def _ensure_genai_client(self):
-        """Returns the context-level GenAI client, creating it on first use.
-
-        Only the native branch calls this, so universal configurations never
-        touch ``genai`` (and never fail on a missing Google key).  The client
-        is stored on the context for connection pooling across agents.
-        """
-        client = getattr(self.ctx, "_genai_client", None)
-        if client is None:
-            logger.info("Initializing GenAI client on context for connection pooling (Explorer)")
-            api_key = getattr(settings, "GOOGLE_API_KEY", None)
-            client = genai.Client(api_key=api_key.get_secret_value() if api_key else None)
-            self.ctx._genai_client = client
-        self.client = client
-        return client
+        raise RuntimeError("Native Gemini is disabled; use the OpenAI-compatible engine")
 
     # ------------------------------------------------------------------ #
     # Tier application

@@ -397,15 +397,16 @@ async def test_credentials_probe_and_dynamic_update():
     """Verify dynamic API key updates and metadata reflection."""
     from artemis.config import settings
 
-    settings.set_api_key("google", "test_gemini_key_1234567890", persist_to_env=False)
-
+    settings.set_api_key("openai", "test_oneapi_key_1234567890", persist_to_env=False)
     probe = LLMCredentialsProbe()
     result = await probe.probe()
     assert result.status == ProbeStatus.PASS
-    assert "current_key" in result.metadata
-    assert result.metadata["current_key"] == "test_gemini_key_1234567890"
-    assert "api_keys" in result.metadata
-    assert result.metadata["api_keys"]["google"] == "test_gemini_key_1234567890"
+    providers = result.metadata["providers"]
+    assert providers[0]["provider"] == "openai"
+    assert providers[0]["masked"] == "****7890"
+    assert "test_oneapi_key_1234567890" not in str(result.metadata)
+    assert "api_keys" not in result.metadata
+
 
 
 @pytest.mark.asyncio

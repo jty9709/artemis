@@ -164,7 +164,8 @@ def test_llm_config_parsing_and_merging():
         }
     }
     merged = deep_merge_llm_config(llm_cfg, overrides)
-    assert merged.planner.model == "custom-model-v1"
+    from artemis.config import settings
+    assert merged.planner.model == settings.OPENAI_MODEL
     assert merged.planner.temperature == 0.7
 
 

@@ -40,3 +40,20 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             item.add_marker(pytest.mark.integration)
         if "e2e" in parts:
             item.add_marker(pytest.mark.e2e)
+
+
+@pytest.fixture(autouse=True)
+def isolate_unit_model_credentials(request, monkeypatch):
+    """Never send local credentials to a service or include them in unit-test failures."""
+    if "unit" not in Path(str(request.fspath)).parts:
+        return
+    from pydantic import SecretStr
+    from artemis.config import settings
+
+    for name, value in {
+        "OPENAI_BASE_URL": "http://127.0.0.1:9/v1",
+        "OPENAI_API_KEY": "unit-test-key",
+        "OPENAI_MODEL": "unit-test-vision",
+    }.items():
+        monkeypatch.setenv(name, value)
+        monkeypatch.setattr(settings, name, SecretStr(value) if name.endswith("KEY") else value)

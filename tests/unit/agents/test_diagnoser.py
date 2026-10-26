@@ -212,6 +212,78 @@ async def test_diagnostic_agent_no_video_tool_when_disabled(
     assert "analyze_logs" in tool_names
 
 
+@pytest.mark.asyncio
+async def test_diagnoser_stops_after_three_failed_tool_rounds(mock_context, mock_state):
+    async def analyze(specific_query: str) -> str:
+        return ToolFailure("Log analysis unavailable: invalid timestamp")
+
+    tool = StructuredTool.from_function(
+        coroutine=analyze, name="analyze_logs", description="Analyze"
+    )
+    agent = Diagnoser(mock_context)
+    agent._build_traced_tools = Mock(return_value=[tool])
+    agent._build_plan_and_history = Mock(return_value="")
+    agent._invoke_model = AsyncMock(
+        side_effect=[
+            AIMessage(
+                content="",
+                tool_calls=[{"name": tool.name, "args": {"specific_query": str(i)}, "id": f"c{i}"}],
+            )
+            for i in range(10)
+        ]
+    )
+    with patch("artemis.agents.diagnoser.diagnoser.get_llm", return_value=Mock()):
+        outcome = await agent.run("Diagnose", mock_state)
+
+    assert isinstance(outcome, ToolFailure)
+    assert "3 consecutive" in outcome
+    assert "invalid timestamp" in outcome
+    assert agent._invoke_model.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_diagnoser_allows_tool_recovery(mock_context, mock_state):
+    results = iter(
+        [
+            ToolFailure("offline"),
+            ToolFailure("offline"),
+            "Evidence recovered",
+            ToolFailure("offline"),
+            ToolFailure("offline"),
+            "Evidence recovered",
+        ]
+    )
+
+    async def analyze(specific_query: str) -> str:
+        return next(results)
+
+    tool = StructuredTool.from_function(
+        coroutine=analyze, name="analyze_logs", description="Analyze"
+    )
+    agent = Diagnoser(mock_context)
+    agent._build_traced_tools = Mock(return_value=[tool])
+    agent._build_plan_and_history = Mock(return_value="")
+    agent._invoke_model = AsyncMock(
+        side_effect=[
+            *[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": tool.name, "args": {"specific_query": "x"}, "id": f"c{i}"}
+                    ],
+                )
+                for i in range(6)
+            ],
+            AIMessage(content="Diagnosis recovered."),
+        ]
+    )
+    with patch("artemis.agents.diagnoser.diagnoser.get_llm", return_value=Mock()):
+        outcome = await agent.run("Diagnose", mock_state)
+
+    assert outcome == "Diagnosis recovered."
+    assert agent._invoke_model.await_count == 7
+
+
 @patch("artemis.agents.diagnoser.diagnoser.get_llm")
 @patch("artemis.tools.video_tool.VideoAnalyzer")
 @pytest.mark.asyncio

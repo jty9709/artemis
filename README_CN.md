@@ -75,6 +75,25 @@
 
 <a id="quick-start"></a>
 <a id="快速上手"></a>
+## 本地 OpenAI 兼容接口配置
+
+此版本的主模型、辅助节点、备用路径、截图摘要、历史压缩和视频关键帧分析统一使用一套 OpenAI 兼容接口，不需要 Gemini Key。
+
+在项目根目录的 `.env` 中配置：
+
+```dotenv
+OPENAI_BASE_URL=https://你的OneAPI地址/v1
+OPENAI_API_KEY=你的Key
+OPENAI_MODEL=服务商提供的模型ID
+```
+
+Base URL 填 API 根地址，不包含 `/chat/completions`。模型需支持图片输入和工具调用；接口需支持 Chat Completions。
+以上三项是模型连接的唯一配置来源，旧配置文件中的节点模型与备用提供商不会覆盖它们。
+`.env` 已被 `.gitignore` 忽略，不要把真实 Key 写入源码或提交到仓库。
+
+可选 OCR 也使用同一套模型，默认关闭；需要时在 `.env` 中增加 `ARTEMIS_OCR_ENABLED=true`，不需要额外的 Google Vision 凭证。
+修改配置后重启 MCP 服务。仅使用 MCP 时可设置 `ARTEMIS_STANDALONE=1`，直接运行任务而不启动网页后台。
+
 ## 快速上手
 
 确保电脑已连接 Android 实体机（已开启 **USB 调试**）或 Android 模拟器。一键启动脚本将会自动完成以下配置：

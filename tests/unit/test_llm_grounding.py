@@ -15,6 +15,7 @@
 """Unit tests for ModelFactory instantiation and grounding tool wiring."""
 
 from artemis.llm.router import ModelEndpoint, ModelFactory, ModelProvider
+from artemis.config import settings
 
 
 def test_model_factory_anthropic_instantiation():
@@ -26,8 +27,8 @@ def test_model_factory_anthropic_instantiation():
         reasoning_effort="high",
     )
     model = ModelFactory.create_model(anth_ep)
-    assert model.model == "claude-3-7-sonnet-20250219"
-    assert getattr(model, "thinking", None) == {"type": "enabled", "budget_tokens": 32768}
+    assert model.model_name == settings.OPENAI_MODEL
+    assert model.openai_api_base == settings.OPENAI_BASE_URL
 
 
 def test_model_factory_openai_instantiation():
@@ -39,7 +40,7 @@ def test_model_factory_openai_instantiation():
         reasoning_effort="medium",
     )
     model = ModelFactory.create_model(oai_ep)
-    assert model.model_name == "o3-mini"
+    assert model.model_name == settings.OPENAI_MODEL
     assert getattr(model, "reasoning_effort", None) == "medium"
 
 
@@ -128,37 +129,14 @@ def test_robust_chat_model_wrapper_grounding_non_google():
     assert "tool_config" not in bound.base_model.bound_kwargs
 
 
-def test_chat_google_generative_ai_process_tool_config_patch():
-    """Verify patched ChatGoogleGenerativeAI preserves include_server_side_tool_invocations even with tool_choice."""
-    from artemis.llm.router import ModelFactory
-    from langchain_google_genai import ChatGoogleGenerativeAI
-    from langchain_core.tools import tool
+def test_google_endpoint_is_redirected_to_openai():
+    """Legacy Google choices cannot construct a native Google client."""
+    from langchain_openai import ChatOpenAI
+    from unittest.mock import patch
 
-    @tool
-    def dummy_tool(query: str) -> str:
-        """A test tool."""
-        return query
-
-    # Trigger patching via Google model creation
-    ep = ModelEndpoint(provider=ModelProvider.GOOGLE, model_name="gemini-2.5-flash", api_key="fake")
-    model = ModelFactory.create_model(ep)
-    assert isinstance(model, ChatGoogleGenerativeAI)
-
-    formatted_tools = model._format_tools([dummy_tool, {"google_search": {}}], None)
-
-    # 1. With tool_choice="auto"
-    config_auto = model._process_tool_config("auto", None, formatted_tools)
-    assert config_auto is not None
-    assert config_auto.include_server_side_tool_invocations is True
-
-    # 2. With tool_choice="any"
-    config_any = model._process_tool_config("any", None, formatted_tools)
-    assert config_any is not None
-    assert config_any.include_server_side_tool_invocations is True
-
-    # 3. With explicit tool_config
-    config_explicit = model._process_tool_config(
-        None, {"include_server_side_tool_invocations": True}, formatted_tools
-    )
-    assert config_explicit is not None
-    assert config_explicit.include_server_side_tool_invocations is True
+    ep = ModelEndpoint(provider=ModelProvider.GOOGLE, model_name="gemini-legacy", api_key="fake")
+    with patch("google.genai.Client", side_effect=AssertionError("Google client is forbidden")):
+        model = ModelFactory.create_model(ep)
+    assert isinstance(model, ChatOpenAI)
+    assert model.model_name == settings.OPENAI_MODEL
+    assert model.openai_api_base == settings.OPENAI_BASE_URL

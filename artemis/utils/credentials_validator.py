@@ -16,14 +16,12 @@
 
 import httpx
 
-from artemis.llm.google.provider import is_google_family_provider
+from artemis.config import settings
+from artemis.config.settings import is_placeholder_key
 
 from third_party.mobile_use.utils.logger import get_logger
 
 logger = get_logger(__name__)
-
-# Minimal 1x1 PNG transparent pixel base64 for Vision API testing
-_TINY_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
 
 
 def _extract_error_message(resp: httpx.Response) -> str:
@@ -73,119 +71,31 @@ async def validate_api_key(
     Returns:
         tuple[bool, str]: (is_valid, descriptive_message)
     """
-    clean_provider = provider.strip().lower()
+    if provider.strip().lower() != "openai":
+        return False, "Only the configured OpenAI-compatible service is enabled."
     clean_key = api_key.strip()
-
     if not clean_key:
         return False, "API key cannot be empty."
-
-    # Placeholders / default template values should be rejected
-    if clean_key in (
-        "API_KEY",
-        "your_gemini_api_key_here",
-        "your_google_cloud_vision_api_key_here",
-        "your_openai_api_key_here",
-        "your_anthropic_api_key_here",
-    ):
-        return False, "Please enter a real API key instead of the placeholder."
-
+    if is_placeholder_key(clean_key):
+        return False, "Please configure a real OPENAI_API_KEY."
+    endpoint = base_url or settings.OPENAI_BASE_URL
+    if not endpoint:
+        return False, "Configure OPENAI_BASE_URL in .env."
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            if is_google_family_provider(clean_provider):
-                # Test Google Gemini via generativelanguage API
-                # The key travels in a header, never in the URL: httpx logs request
-                # URLs at INFO level and those logs end up in files.
-                url = "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1"
-                resp = await client.get(url, headers={"x-goog-api-key": clean_key})
-                if resp.status_code == 200:
-                    return True, "Google Gemini API key verified successfully."
-                err_msg = _extract_error_message(resp)
-                return False, f"Gemini API verification failed ({resp.status_code}): {err_msg}"
-
-            elif clean_provider in ("ocr", "vision", "google_vision"):
-                # Test Google Cloud Vision OCR API
-                url = "https://vision.googleapis.com/v1/images:annotate"
-                payload = {
-                    "requests": [
-                        {
-                            "image": {"content": _TINY_PNG_B64},
-                            "features": [{"type": "TEXT_DETECTION"}],
-                        }
-                    ]
-                }
-                resp = await client.post(
-                    url,
-                    json=payload,
-                    headers={"Content-Type": "application/json", "x-goog-api-key": clean_key},
-                )
-                if resp.status_code == 200:
-                    return True, "Google Cloud Vision OCR API key verified successfully."
-                err_msg = _extract_error_message(resp)
-                return False, f"Vision OCR API verification failed ({resp.status_code}): {err_msg}"
-
-            elif clean_provider == "openai":
-                endpoint = (
-                    f"{base_url.rstrip('/')}/models"
-                    if base_url
-                    else "https://api.openai.com/v1/models"
-                )
-                resp = await client.get(endpoint, headers={"Authorization": f"Bearer {clean_key}"})
-                if resp.status_code == 200:
-                    return True, "OpenAI API key verified successfully."
-                err_msg = _extract_error_message(resp)
-                return False, f"OpenAI API verification failed ({resp.status_code}): {err_msg}"
-
-            elif clean_provider in ("anthropic", "claude"):
-                url = "https://api.anthropic.com/v1/models"
-                resp = await client.get(
-                    url,
-                    headers={
-                        "x-api-key": clean_key,
-                        "anthropic-version": "2023-06-01",
-                    },
-                )
-                if resp.status_code == 200:
-                    return True, "Anthropic Claude API key verified successfully."
-                err_msg = _extract_error_message(resp)
-                return False, f"Anthropic API verification failed ({resp.status_code}): {err_msg}"
-
-            elif clean_provider == "openrouter":
-                url = "https://openrouter.ai/api/v1/auth/key"
-                resp = await client.get(url, headers={"Authorization": f"Bearer {clean_key}"})
-                if resp.status_code == 200:
-                    return True, "OpenRouter API key verified successfully."
-                err_msg = _extract_error_message(resp)
-                return False, f"OpenRouter API verification failed ({resp.status_code}): {err_msg}"
-
-            elif clean_provider in ("xai", "grok"):
-                url = "https://api.x.ai/v1/models"
-                resp = await client.get(url, headers={"Authorization": f"Bearer {clean_key}"})
-                if resp.status_code == 200:
-                    return True, "xAI API key verified successfully."
-                err_msg = _extract_error_message(resp)
-                return False, f"xAI API verification failed ({resp.status_code}): {err_msg}"
-
-            elif clean_provider in ("ollama", "vllm", "custom"):
-                if base_url:
-                    endpoint = f"{base_url.rstrip('/')}/models"
-                    headers = (
-                        {"Authorization": f"Bearer {clean_key}"} if clean_key != "EMPTY" else {}
-                    )
-                    resp = await client.get(endpoint, headers=headers)
-                    if resp.status_code == 200:
-                        return True, f"Custom endpoint ({base_url}) verified successfully."
-                    err_msg = _extract_error_message(resp)
-                    return (
-                        False,
-                        f"Custom endpoint verification failed ({resp.status_code}): {err_msg}",
-                    )
-                return True, "Custom endpoint configured."
-
-            else:
-                # Unknown provider - fallback to basic length check
-                if len(clean_key) >= 8:
-                    return True, f"Credentials for {provider} configured."
-                return False, f"Invalid API key format for {provider}."
+            resp = await client.get(
+                endpoint.rstrip("/") + "/models",
+                headers={"Authorization": f"Bearer {clean_key}"},
+            )
+        if resp.status_code == 200:
+            models = [item.get("id") for item in resp.json().get("data", [])]
+            if settings.OPENAI_MODEL and settings.OPENAI_MODEL not in models:
+                return False, "OPENAI_MODEL is not listed by the configured service."
+            return True, "Configured OpenAI-compatible service and model verified."
+        return (
+            False,
+            f"API verification failed ({resp.status_code}): {_extract_error_message(resp)}",
+        )
 
     except httpx.TimeoutException:
         logger.warning(f"Timeout verifying API key for {provider}")

@@ -36,7 +36,6 @@ import tempfile
 import time
 from typing import Any
 
-from google import genai
 from google.genai import types
 from langchain_core.messages import (
     BaseMessage,
@@ -49,9 +48,6 @@ from artemis.agents.video_analyzer.conflict_resolution import (
     ConflictResolutionService,
 )
 from artemis.agents.video_analyzer.blackboard import get_video_blackboard
-from artemis.agents.video_analyzer.gemini_files import (
-    cleanup_abandoned_gemini_files,
-)
 from artemis.agents.video_analyzer.reliability import (
     AgenticVideoDegraded,
     VideoCircuitBreaker,
@@ -69,9 +65,7 @@ from artemis.context import ArtemisContext
 from artemis.controllers.controller_factory import get_controller
 from artemis.data_engine.trace import CURRENT_TRACE_ID, TraceSpan, trace
 from artemis.llm.google import (
-    is_gemini_model,
     resolve_video_processing,
-    strip_provider_prefix,
 )
 from artemis.llm.reliability import retry_policy_for
 from artemis.services.llm import _record_llm_event, _record_llm_retry, get_llm
@@ -412,36 +406,10 @@ class VideoAnalyzer:
         self.submit_answer_tool = build_submit_answer_declaration()
 
     def _init_engine(self) -> None:
-        """Initializes model engine and decides whether to use native Gemini or Universal path."""
-        ctx = self.ctx
-        llm_config = getattr(ctx, "llm_config", None)
-        utils_cfg = getattr(llm_config, "utils", None) if llm_config else None
-        llm_cfg = getattr(utils_cfg, "video_analyzer", None) if utils_cfg else None
-        self.model_name = strip_provider_prefix(
-            llm_cfg.model if (llm_cfg and hasattr(llm_cfg, "model")) else "gemini-3.8-flash"
-        )
-
-        has_google_key = bool(
-            settings.GOOGLE_API_KEY and settings.GOOGLE_API_KEY.get_secret_value()
-        )
-
-        # If client is already set on ctx or explicit Gemini configuration
-        self.client = getattr(ctx, "_genai_client", None)
-        if self.client is not None:
-            self.use_native_gemini = True
-        elif has_google_key and is_gemini_model(self.model_name):
-            try:
-                self.client = genai.Client(api_key=settings.GOOGLE_API_KEY.get_secret_value())
-                ctx._genai_client = self.client
-                self.use_native_gemini = True
-                asyncio.create_task(cleanup_abandoned_gemini_files(self.client))
-            except Exception as e:
-                logger.warning(
-                    f"Failed to initialize native Gemini client: {e}. Using universal engine."
-                )
-                self.use_native_gemini = False
-        else:
-            self.use_native_gemini = False
+        """Use keyframe-based video analysis through the configured chat endpoint."""
+        self.model_name = settings.OPENAI_MODEL
+        self.client = None
+        self.use_native_gemini = False
         self._resolve_video_processing()
 
     def _resolve_video_processing(self) -> None:
@@ -823,13 +791,13 @@ class VideoAnalyzer:
             temperature = 0.2
             thinking_level = None
             if llm_cfg:
-                self.model_name = strip_provider_prefix(llm_cfg.model)
+                self.model_name = settings.OPENAI_MODEL
                 if getattr(llm_cfg, "temperature", None) is not None:
                     temperature = llm_cfg.temperature
                 if getattr(llm_cfg, "thinking_level", None) is not None:
                     thinking_level = llm_cfg.thinking_level
             else:
-                self.model_name = "gemini-3.8-flash"
+                self.model_name = settings.OPENAI_MODEL
 
             # Track files for cleanup
             self.local_files_to_cleanup = set()
